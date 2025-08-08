@@ -1,12 +1,9 @@
 services:
   - type: web
-    name: your-flask-app
+    name: ebay-scraper
     env: python
-    plan: free
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "python app.py"
+    startCommand: "gunicorn --bind 0.0.0.0:$PORT app:app"
     envVars:
       - key: GEMINI_API_KEY
-        sync: false
-      - key: EBAY_APP_ID
         sync: false
