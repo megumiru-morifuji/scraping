@@ -137,12 +137,21 @@ class EbayScraper:
             # eBayの検索URL（売れた商品のみ）
             url = f"https://www.ebay.com/sch/i.html?_nkw={quote_plus(keyword)}&LH_Sold=1&_pgn=1"
             
+            logger.info(f"アクセスURL: {url}")
+            
             # リクエストヘッダーにランダム性を追加
             headers = self.session.headers.copy()
             headers['Cache-Control'] = 'no-cache'
             headers['Pragma'] = 'no-cache'
             
             response = self.session.get(url, headers=headers, timeout=10)
+            logger.info(f"レスポンスコード: {response.status_code}")
+            
+            # レスポンス内容の一部をログ出力（デバッグ用）
+            if "bot" in response.text.lower() or "captcha" in response.text.lower():
+                logger.warning(f"ボット検出の可能性: {keyword}")
+                logger.warning(f"レスポンス断片: {response.text[:500]}")
+            
             response.raise_for_status()
             
             # レスポンス後の人間らしい遅延
@@ -150,19 +159,31 @@ class EbayScraper:
             
             soup = BeautifulSoup(response.content, 'html.parser')
             
-            # 商品要素を取得（最大20件に制限）
-            items = soup.find_all('div', class_='s-item__wrapper')[:20]
+            # 商品要素を取得（複数のセレクターを試す）
+            items = soup.find_all('div', class_='s-item__wrapper')
+            if not items:
+                # 別のセレクターも試す
+                items = soup.find_all('div', class_='s-item')
+                logger.info(f"代替セレクター使用: {len(items)} 件")
             
-            for item in items:
+            logger.info(f"取得した商品要素数: {len(items)}")
+            
+            # 最大20件に制限
+            items = items[:20]
+            
+            for i, item in enumerate(items):
                 try:
                     product_data = self.extract_product_info(item)
                     if product_data:
                         products.append(product_data)
+                        logger.info(f"商品 {i+1}: {product_data['title'][:50]}... - ${product_data['price']}")
                         # アイテム処理間の微小な遅延
                         time.sleep(random.uniform(0.1, 0.3))
-                except Exception:
-                    # エラーは無視して続行
+                except Exception as e:
+                    logger.warning(f"商品 {i+1} 抽出エラー: {e}")
                     continue
+            
+            logger.info(f"最終取得商品数: {len(products)}")
             
         except Exception as e:
             logger.error(f"検索エラー ({keyword}): {e}")
@@ -170,36 +191,60 @@ class EbayScraper:
         return products
     
     def extract_product_info(self, item):
-        """商品情報を抽出（簡略化版）"""
+        """商品情報を抽出（改良版）"""
         try:
-            # タイトル
-            title_elem = item.find('h3', class_='s-item__title')
-            if not title_elem:
-                return None
-            title = title_elem.get_text(strip=True)
+            # タイトル（複数のセレクターを試す）
+            title_elem = item.find('h3', class_='s-item__title') or \
+                        item.find('a', class_='s-item__link') or \
+                        item.find('span', role='heading')
             
-            # 価格
-            price_elem = item.find('span', class_='s-item__price')
+            if not title_elem:
+                logger.debug("タイトル要素が見つからない")
+                return None
+            
+            title = title_elem.get_text(strip=True)
+            if not title or title == 'New Listing':
+                logger.debug("有効なタイトルなし")
+                return None
+            
+            # 価格（複数のセレクターを試す）
+            price_elem = item.find('span', class_='s-item__price') or \
+                        item.find('span', class_='notranslate')
+            
             if not price_elem:
+                logger.debug("価格要素が見つからない")
                 return None
             
             price_text = price_elem.get_text(strip=True)
+            logger.debug(f"価格テキスト: {price_text}")
             
-            # 価格パース
+            # 価格をパース（より柔軟に）
             try:
-                price_clean = price_text.replace('$', '').replace(',', '').replace(' ', '')
-                if 'to' in price_clean.lower():
-                    price_clean = price_clean.split('to')[0]
-                price = float(price_clean)
-            except:
-                return None  # 価格がパースできない場合はスキップ
+                # $記号と数字以外を除去
+                import re
+                price_match = re.search(r'[\$]?([\d,]+\.?\d*)', price_text)
+                if price_match:
+                    price_clean = price_match.group(1).replace(',', '')
+                    price = float(price_clean)
+                    if price <= 0:
+                        return None
+                else:
+                    logger.debug(f"価格パース失敗: {price_text}")
+                    return None
+            except Exception as e:
+                logger.debug(f"価格変換エラー: {e}")
+                return None
             
-            return {
+            product = {
                 'title': title,
                 'price': price
             }
             
-        except Exception:
+            logger.debug(f"商品抽出成功: {title[:30]}... - ${price}")
+            return product
+            
+        except Exception as e:
+            logger.debug(f"商品情報抽出エラー: {e}")
             return None
 
 def analyze_with_gemini(products_data):
