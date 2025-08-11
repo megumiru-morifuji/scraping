@@ -9,23 +9,29 @@ from urllib.parse import quote_plus
 import google.generativeai as genai
 import json
 import logging
+import threading
+from datetime import datetime
+import uuid
 
 # ログ設定
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-CORS(app)  # Google Apps ScriptからのCORS対応
+CORS(app)
 
 # Gemini API設定
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel('gemini-pro')
 
+# プロセス状態管理
+process_status = {}
+results_cache = {}
+
 class EbayScraper:
     def __init__(self):
         self.session = requests.Session()
-        # User-Agentの設定（ブロック回避）
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -36,12 +42,11 @@ class EbayScraper:
             'Upgrade-Insecure-Requests': '1'
         })
     
-    def search_japanese_products(self, max_pages=3):
-        """和風商品を検索する"""
-        # 和風関連のキーワード
+    def search_japanese_products_async(self, process_id, keywords_limit=10):
+        """非同期で和風商品を検索する"""
         japanese_keywords = [
             'japanese traditional',
-            'japanese vintage',
+            'japanese vintage', 
             'japanese kimono',
             'japanese ceramics',
             'japanese art',
@@ -49,61 +54,113 @@ class EbayScraper:
             'japanese pottery',
             'japanese woodblock',
             'japanese sword',
-            'japanese tea ceremony'
+            'japanese tea ceremony',
+            'japanese lacquer',
+            'japanese calligraphy',
+            'japanese fabric',
+            'japanese doll',
+            'japanese screen'
         ]
         
+        # 指定されたキーワード数に制限
+        keywords_to_search = japanese_keywords[:keywords_limit]
+        total_keywords = len(keywords_to_search)
+        
         all_products = {}
+        completed_keywords = 0
         
-        for keyword in japanese_keywords[:5]:  # 最初の5つのキーワードに制限
-            try:
-                logger.info(f"検索中: {keyword}")
-                products = self.scrape_ebay_search(keyword, max_pages=2)
-                if products:
-                    all_products[keyword] = products
-                time.sleep(random.uniform(2, 4))  # リクエスト間隔
-            except Exception as e:
-                logger.error(f"キーワード {keyword} の検索でエラー: {e}")
-                continue
-        
-        return all_products
+        try:
+            # プロセス状態を初期化
+            process_status[process_id] = {
+                'status': 'running',
+                'progress': 0,
+                'current_keyword': '',
+                'total_keywords': total_keywords,
+                'completed_keywords': 0,
+                'start_time': datetime.now(),
+                'error': None
+            }
+            
+            for i, keyword in enumerate(keywords_to_search):
+                try:
+                    # プロセス状態を更新
+                    process_status[process_id]['current_keyword'] = keyword
+                    process_status[process_id]['progress'] = int((i / total_keywords) * 100)
+                    
+                    logger.info(f"[{process_id}] 検索中 ({i+1}/{total_keywords}): {keyword}")
+                    
+                    # キーワード検索（ページ数を少なく）
+                    products = self.scrape_ebay_search(keyword, max_pages=1)
+                    
+                    if products:
+                        all_products[keyword] = products
+                        logger.info(f"[{process_id}] {keyword}: {len(products)} 件取得")
+                    
+                    completed_keywords += 1
+                    process_status[process_id]['completed_keywords'] = completed_keywords
+                    
+                    # リクエスト間隔（短縮）
+                    time.sleep(random.uniform(1, 2))
+                    
+                except Exception as e:
+                    logger.error(f"[{process_id}] キーワード {keyword} の検索でエラー: {e}")
+                    # エラーでも続行
+                    continue
+            
+            # 完了処理
+            process_status[process_id]['status'] = 'analyzing'
+            process_status[process_id]['progress'] = 90
+            
+            # 分析実行
+            result = analyze_with_gemini(all_products)
+            
+            # 結果をキャッシュに保存
+            results_cache[process_id] = result
+            
+            # プロセス完了
+            process_status[process_id]['status'] = 'completed'
+            process_status[process_id]['progress'] = 100
+            process_status[process_id]['end_time'] = datetime.now()
+            
+            logger.info(f"[{process_id}] 処理完了")
+            
+        except Exception as e:
+            logger.error(f"[{process_id}] 処理エラー: {e}")
+            process_status[process_id]['status'] = 'error'
+            process_status[process_id]['error'] = str(e)
     
-    def scrape_ebay_search(self, keyword, max_pages=2):
-        """eBayで特定のキーワードを検索し、商品情報を取得"""
+    def scrape_ebay_search(self, keyword, max_pages=1):
+        """eBayで特定のキーワードを検索（軽量化版）"""
         products = []
         
-        for page in range(1, max_pages + 1):
-            try:
-                # eBayの検索URL（売れた商品のみ、LH_Soldを使用）
-                url = f"https://www.ebay.com/sch/i.html?_nkw={quote_plus(keyword)}&LH_Sold=1&_pgn={page}"
-                
-                response = self.session.get(url, timeout=10)
-                response.raise_for_status()
-                
-                soup = BeautifulSoup(response.content, 'html.parser')
-                
-                # 商品要素を取得
-                items = soup.find_all('div', class_='s-item__wrapper')
-                
-                for item in items:
-                    try:
-                        product_data = self.extract_product_info(item)
-                        if product_data:
-                            products.append(product_data)
-                    except Exception as e:
-                        logger.warning(f"商品データ抽出エラー: {e}")
-                        continue
-                
-                logger.info(f"{keyword} - ページ {page}: {len(items)} 件取得")
-                time.sleep(random.uniform(1, 3))
-                
-            except Exception as e:
-                logger.error(f"ページ {page} の取得でエラー: {e}")
-                break
+        try:
+            # eBayの検索URL（売れた商品のみ）
+            url = f"https://www.ebay.com/sch/i.html?_nkw={quote_plus(keyword)}&LH_Sold=1&_pgn=1"
+            
+            response = self.session.get(url, timeout=8)  # タイムアウト短縮
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            # 商品要素を取得（最大20件に制限）
+            items = soup.find_all('div', class_='s-item__wrapper')[:20]
+            
+            for item in items:
+                try:
+                    product_data = self.extract_product_info(item)
+                    if product_data:
+                        products.append(product_data)
+                except Exception:
+                    # エラーは無視して続行
+                    continue
+            
+        except Exception as e:
+            logger.error(f"検索エラー ({keyword}): {e}")
         
         return products
     
     def extract_product_info(self, item):
-        """商品情報を抽出"""
+        """商品情報を抽出（簡略化版）"""
         try:
             # タイトル
             title_elem = item.find('h3', class_='s-item__title')
@@ -118,41 +175,33 @@ class EbayScraper:
             
             price_text = price_elem.get_text(strip=True)
             
-            # 価格をパース（$記号と,を除去）
+            # 価格パース
             try:
                 price_clean = price_text.replace('$', '').replace(',', '').replace(' ', '')
-                # 範囲価格の場合は最初の価格を使用
                 if 'to' in price_clean.lower():
                     price_clean = price_clean.split('to')[0]
                 price = float(price_clean)
             except:
-                price = 0
-            
-            # 販売終了日
-            date_elem = item.find('span', class_='s-item__ended-date')
-            sold_date = date_elem.get_text(strip=True) if date_elem else ''
+                return None  # 価格がパースできない場合はスキップ
             
             return {
                 'title': title,
-                'price': price,
-                'sold_date': sold_date,
-                'url': item.find('a', class_='s-item__link').get('href') if item.find('a', class_='s-item__link') else ''
+                'price': price
             }
-        except Exception as e:
-            logger.warning(f"商品情報抽出エラー: {e}")
+            
+        except Exception:
             return None
 
 def analyze_with_gemini(products_data):
-    """Gemini APIで商品データを分析"""
+    """Gemini APIで商品データを分析（軽量化版）"""
     try:
-        # データの統計を計算
         ranking_data = []
         
         for keyword, products in products_data.items():
             if not products:
                 continue
                 
-            prices = [p['price'] for p in products if p['price'] > 0]
+            prices = [p['price'] for p in products if p.get('price', 0) > 0]
             if not prices:
                 continue
             
@@ -167,74 +216,120 @@ def analyze_with_gemini(products_data):
         # 人気順にソート
         ranking_data.sort(key=lambda x: x['count'], reverse=True)
         
-        # Gemini用のプロンプト作成
-        analysis_text = "以下は和風商品のeBay販売データです:\n\n"
-        for data in ranking_data:
-            analysis_text += f"キーワード: {data['keyword']}\n"
-            analysis_text += f"販売件数: {data['count']}件\n"
-            analysis_text += f"平均価格: ${data['mean']}\n"
-            analysis_text += f"最高価格: ${data['max']}\n\n"
+        # Gemini用のプロンプト（短縮版）
+        analysis_text = "和風商品のeBay販売データ:\n\n"
+        for data in ranking_data[:5]:  # 上位5つのみ
+            analysis_text += f"{data['keyword']}: {data['count']}件, 平均${data['mean']}\n"
         
-        analysis_text += """
-この販売データから以下の点について200文字以内で分析してください：
-1. どのカテゴリの和風商品が人気か
-2. 価格帯の傾向
-3. 販売機会についてのアドバイス
-"""
+        analysis_text += "\n150文字以内で人気カテゴリと価格傾向を分析してください。"
         
         # Gemini APIで分析
         response = model.generate_content(analysis_text)
         analysis_comment = response.text
         
         return {
-            'ranking': ranking_data[:10],  # トップ10
-            'analysis': analysis_comment
+            'ranking': ranking_data,
+            'analysis': analysis_comment,
+            'total_products': sum(len(products) for products in products_data.values())
         }
         
     except Exception as e:
         logger.error(f"Gemini分析エラー: {e}")
         return {
             'ranking': ranking_data if 'ranking_data' in locals() else [],
-            'analysis': f"分析中にエラーが発生しました: {str(e)}"
+            'analysis': f"分析エラー: {str(e)}",
+            'total_products': 0
         }
 
 @app.route('/')
 def home():
-    return "eBay Japanese Products Scraper API"
+    return "eBay Japanese Products Scraper API - Async Version"
 
-@app.route('/fetch_ebay_data', methods=['POST'])
-def fetch_ebay_data():
+@app.route('/start_scraping', methods=['POST'])
+def start_scraping():
+    """スクレイピング開始（非同期）"""
     try:
-        logger.info("eBayデータ取得開始")
+        # リクエストパラメータ
+        data = request.get_json() or {}
+        keywords_limit = min(data.get('keywords_limit', 5), 10)  # 最大10個に制限
         
-        # スクレイピング実行
+        # プロセスIDを生成
+        process_id = str(uuid.uuid4())
+        
+        # バックグラウンドでスクレイピング開始
         scraper = EbayScraper()
-        products_data = scraper.search_japanese_products(max_pages=2)
+        thread = threading.Thread(
+            target=scraper.search_japanese_products_async,
+            args=(process_id, keywords_limit)
+        )
+        thread.daemon = True
+        thread.start()
         
-        if not products_data:
-            return jsonify({
-                'ranking': [],
-                'analysis': 'データが取得できませんでした。eBayの仕様変更の可能性があります。'
-            })
-        
-        logger.info(f"取得したキーワード数: {len(products_data)}")
-        
-        # Gemini APIで分析
-        result = analyze_with_gemini(products_data)
-        
-        logger.info("分析完了")
-        return jsonify(result)
+        return jsonify({
+            'process_id': process_id,
+            'status': 'started',
+            'message': f'{keywords_limit}個のキーワードで検索を開始しました'
+        })
         
     except Exception as e:
-        logger.error(f"エラー: {e}")
-        return jsonify({
-            'ranking': [],
-            'analysis': f'エラーが発生しました: {str(e)}'
-        }), 500
+        logger.error(f"開始エラー: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/check_progress/<process_id>', methods=['GET'])
+def check_progress(process_id):
+    """プロセス進行状況をチェック"""
+    if process_id not in process_status:
+        return jsonify({'error': 'プロセスが見つかりません'}), 404
+    
+    status = process_status[process_id].copy()
+    
+    # 時間情報を文字列に変換
+    if 'start_time' in status:
+        status['start_time'] = status['start_time'].isoformat()
+    if 'end_time' in status:
+        status['end_time'] = status['end_time'].isoformat()
+    
+    return jsonify(status)
+
+@app.route('/get_results/<process_id>', methods=['GET'])
+def get_results(process_id):
+    """結果を取得"""
+    if process_id not in results_cache:
+        return jsonify({'error': '結果が見つかりません'}), 404
+    
+    result = results_cache[process_id]
+    return jsonify(result)
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    return jsonify({'status': 'ok'})
+    return jsonify({
+        'status': 'ok',
+        'active_processes': len([p for p in process_status.values() if p['status'] == 'running']),
+        'cached_results': len(results_cache)
+    })
+
+# 定期的にキャッシュをクリーンアップ
+def cleanup_old_data():
+    """古いデータをクリーンアップ"""
+    current_time = datetime.now()
+    old_processes = []
+    
+    for process_id, status in process_status.items():
+        start_time = status.get('start_time')
+        if start_time and (current_time - start_time).total_seconds() > 3600:  # 1時間後
+            old_processes.append(process_id)
+    
+    for process_id in old_processes:
+        process_status.pop(process_id, None)
+        results_cache.pop(process_id, None)
+    
+    # 60分後に再実行
+    timer = threading.Timer(3600, cleanup_old_data)
+    timer.daemon = True
+    timer.start()
+
+# クリーンアップを開始
+cleanup_old_data()
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
