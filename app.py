@@ -6,7 +6,6 @@ from bs4 import BeautifulSoup
 import time
 import random
 from urllib.parse import quote_plus
-import google.generativeai as genai
 import json
 import logging
 import threading
@@ -22,8 +21,6 @@ CORS(app)
 
 # Gemini API設定
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-pro')
 
 # プロセス状態管理
 process_status = {}
@@ -134,11 +131,22 @@ class EbayScraper:
         products = []
         
         try:
+            # 人間らしい検索前の遅延
+            time.sleep(random.uniform(0.8, 2.0))
+            
             # eBayの検索URL（売れた商品のみ）
             url = f"https://www.ebay.com/sch/i.html?_nkw={quote_plus(keyword)}&LH_Sold=1&_pgn=1"
             
-            response = self.session.get(url, timeout=8)  # タイムアウト短縮
+            # リクエストヘッダーにランダム性を追加
+            headers = self.session.headers.copy()
+            headers['Cache-Control'] = 'no-cache'
+            headers['Pragma'] = 'no-cache'
+            
+            response = self.session.get(url, headers=headers, timeout=10)
             response.raise_for_status()
+            
+            # レスポンス後の人間らしい遅延
+            time.sleep(random.uniform(0.5, 1.2))
             
             soup = BeautifulSoup(response.content, 'html.parser')
             
@@ -150,6 +158,8 @@ class EbayScraper:
                     product_data = self.extract_product_info(item)
                     if product_data:
                         products.append(product_data)
+                        # アイテム処理間の微小な遅延
+                        time.sleep(random.uniform(0.1, 0.3))
                 except Exception:
                     # エラーは無視して続行
                     continue
@@ -193,7 +203,7 @@ class EbayScraper:
             return None
 
 def analyze_with_gemini(products_data):
-    """Gemini APIで商品データを分析（軽量化版）"""
+    """Gemini APIで商品データを分析（REST API版）"""
     try:
         ranking_data = []
         
@@ -223,9 +233,46 @@ def analyze_with_gemini(products_data):
         
         analysis_text += "\n150文字以内で人気カテゴリと価格傾向を分析してください。"
         
-        # Gemini APIで分析
-        response = model.generate_content(analysis_text)
-        analysis_comment = response.text
+        # Gemini REST API呼び出し
+        gemini_url = (
+            "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent"
+            f"?key={GEMINI_API_KEY}"
+        )
+        
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {
+                            "text": analysis_text
+                        }
+                    ]
+                }
+            ]
+        }
+        
+        # 人間らしいヘッダーを設定
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'application/json',
+            'Accept-Language': 'ja,en-US;q=0.7,en;q=0.3',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Content-Type': 'application/json',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'cross-site'
+        }
+        
+        # 人間らしい遅延を追加
+        time.sleep(random.uniform(0.5, 1.5))
+        
+        response = requests.post(gemini_url, json=payload, headers=headers, timeout=30)
+        response.raise_for_status()
+        
+        result = response.json()
+        analysis_comment = result['candidates'][0]['content']['parts'][0]['text']
         
         return {
             'ranking': ranking_data,
