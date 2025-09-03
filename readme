@@ -1,0 +1,16 @@
+// スクレイピング開始
+fetch('/start_scraping', {
+    method: 'POST',
+    headers: {
+        'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({keywords_limit: 3})
+})
+.then(response => response.json())
+.then(data => {
+    console.log('開始結果:', data);
+    // process_idをコピーして次で使用
+});
+
+
+上記を検証ツールのコンソール画面に打ち込む
