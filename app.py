@@ -1,39 +1,48 @@
-
-
+from flask import Flask, jsonify
 import requests
 from bs4 import BeautifulSoup
 
-# User-Agentを設定（多くのサイトで必要）
-headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-}
+app = Flask(__name__)
 
-# eBayのトップページにリクエスト
-url = 'https://www.ebay.com'
-r = requests.get(url, headers=headers)
+@app.route('/')
+def hello():
+    return "eBay Scraper API is running!"
 
-# BeautifulSoupでパース
-r_text = BeautifulSoup(r.text, 'html.parser')
+@app.route('/scrape-ebay')
+def scrape_ebay():
+    """
+    このエンドポイントにアクセスされた時だけeBayにリクエストが送信される
+    """
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        
+        url = 'https://www.ebay.com'
+        r = requests.get(url, headers=headers)
+        
+        r_text = BeautifulSoup(r.text, 'html.parser')
+        
+        # タイトルを取得
+        title = r_text.find('title')
+        title_text = title.text.strip() if title else "タイトルなし"
+        
+        return jsonify({
+            "status": "success",
+            "status_code": r.status_code,
+            "url": r.url,
+            "title": title_text,
+            "html_preview": r.text[:300]
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        })
 
-# レスポンス情報を表示
-print("ステータスコード:", r.status_code)
-print("URL:", r.url)
-print("=" * 50)
-
-# タイトルタグを取得
-title = r_text.find('title')
-if title:
-    print("ページタイトル:", title.text.strip())
-
-# metaタグから説明を取得
-description = r_text.find('meta', attrs={'name': 'description'})
-if description:
-    print("ページ説明:", description.get('content', 'なし'))
-
-print("=" * 50)
-print("HTMLの最初の500文字:")
-print(r.text[:500])
-
-# レスポンスオブジェクト自体も表示
-print("=" * 50)
-print("レスポンスオブジェクト:", r)
+if __name__ == '__main__':
+    # Renderでは環境変数PORTが設定される
+    import os
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
