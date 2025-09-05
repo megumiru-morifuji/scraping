@@ -51,30 +51,104 @@ def get_ebay_session():
 
 def extract_price_from_text(text):
     """
-    テキストから価格を抽出する改良版関数
+    テキストから価格を抽出し、適切な通貨換算を行う改良版関数
     """
     if not text:
         return "価格不明"
     
-    # 複数の価格パターンを試す
-    price_patterns = [
-        r'Sold for\s*\$?([\d,]+\.?\d*)',  # "Sold for $25.00"
-        r'Price:\s*\$?([\d,]+\.?\d*)',    # "Price: $25.00"
-        r'\$\s*([\d,]+\.?\d*)',           # "$25.00"
-        r'USD\s*([\d,]+\.?\d*)',          # "USD 25.00"
-        r'([\d,]+\.?\d*)\s*USD',          # "25.00 USD"
-        r'sold\s+for\s+\$?([\d,]+\.?\d*)', # 大文字小文字区別なし
+    # 通貨別レート（2024年基準の概算レート）
+    # 実際の運用では為替APIを使用することを推奨
+    rates = {
+        "NT$": 0.032,   # 台湾ドル → USD (1 TWD ≈ 0.032 USD)
+        "HK$": 0.13,    # 香港ドル → USD (1 HKD ≈ 0.13 USD) 
+        "¥": 0.0067,    # 日本円 → USD (1 JPY ≈ 0.0067 USD)
+        "€": 1.08,      # ユーロ → USD (1 EUR ≈ 1.08 USD)
+        "£": 1.25,      # 英ポンド → USD (1 GBP ≈ 1.25 USD)
+        "$": 1.0,       # 米ドル（基準通貨）
+        "USD": 1.0      # 明示的なUSD表記
+    }
+    
+    # 通貨記号付きの価格パターン（優先度順）
+    currency_patterns = [
+        # 台湾ドル（NT$）- eBayでよく見られる
+        r'NT\$\s*([\d,]+(?:\.\d{1,2})?)',
+        # 香港ドル（HK$）
+        r'HK\$\s*([\d,]+(?:\.\d{1,2})?)',
+        # 日本円（¥）
+        r'¥\s*([\d,]+(?:\.\d{1,2})?)',
+        # ユーロ（€）
+        r'€\s*([\d,]+(?:\.\d{1,2})?)',
+        # 英ポンド（£）
+        r'£\s*([\d,]+(?:\.\d{1,2})?)',
+        # 米ドル（$）- 最後に処理（他の通貨と混同を避けるため）
+        r'(?<!NT)(?<!HK)\$\s*([\d,]+(?:\.\d{1,2})?)',
+        # USD明示
+        r'USD\s*([\d,]+(?:\.\d{1,2})?)',
+        r'([\d,]+(?:\.\d{1,2})?)\s*USD'
     ]
     
-    for pattern in price_patterns:
+    # 通貨記号に対応する識別子
+    currency_symbols = ['NT$', 'HK$', '¥', '€', '£', '$', 'USD', 'USD']
+    
+    # 各パターンを試行
+    for i, pattern in enumerate(currency_patterns):
         matches = re.findall(pattern, text, re.IGNORECASE)
         if matches:
             try:
-                # 最初にマッチした価格を返す
-                price_str = matches[0].replace(',', '')
-                price_float = float(price_str)
-                if price_float > 0:
-                    return f"${price_float:.2f}"
+                # 最初にマッチした金額を取得
+                amount_str = matches[0].replace(',', '')
+                amount = float(amount_str)
+                
+                if amount <= 0:
+                    continue
+                
+                # 通貨記号を特定
+                currency = currency_symbols[i]
+                
+                # 米ドルに換算
+                if currency in rates:
+                    usd_amount = amount * rates[currency]
+                else:
+                    # 不明な通貨の場合はそのまま（米ドルと仮定）
+                    usd_amount = amount
+                
+                # デバッグ出力（必要に応じて有効化）
+                debug_mode = getattr(extract_price_from_text, 'debug_mode', False)
+                if debug_mode:
+                    print(f"    💰 価格変換: {currency}{amount:,} → ${usd_amount:.2f}")
+                
+                # 異常に高額な価格をフィルタリング（50万ドル以上は異常値として扱う）
+                if usd_amount > 500000:
+                    if debug_mode:
+                        print(f"    ⚠️  異常に高額な価格を検出: {currency}{amount:,} (${usd_amount:.2f}) - スキップ")
+                    continue
+                
+                # 異常に安い価格もフィルタリング（1ドル未満）
+                if usd_amount < 1.0:
+                    continue
+                
+                return f"${usd_amount:.2f}"
+                
+            except (ValueError, IndexError):
+                continue
+    
+    # 通貨記号なしの数値パターン（最後の手段）
+    number_only_patterns = [
+        r'sold\s+for\s+([\d,]+\.?\d*)',
+        r'price[:\s]+([\d,]+\.?\d*)',
+        r'([\d,]+\.?\d*)\s*(?:dollars?|usd)?'
+    ]
+    
+    for pattern in number_only_patterns:
+        matches = re.findall(pattern, text, re.IGNORECASE)
+        if matches:
+            try:
+                amount_str = matches[0].replace(',', '')
+                amount = float(amount_str)
+                
+                # 妥当な価格範囲かチェック
+                if 1.0 <= amount <= 500000:
+                    return f"${amount:.2f}"
             except (ValueError, IndexError):
                 continue
     
@@ -82,7 +156,7 @@ def extract_price_from_text(text):
 
 def extract_item_data(item_element):
     """
-    商品要素から詳細情報を抽出（価格抽出大幅改良版）
+    商品要素から詳細情報を抽出（改良版価格処理付き）
     """
     try:
         # タイトル抽出（改良版）
@@ -115,7 +189,7 @@ def extract_item_data(item_element):
                     title = link_text
                     break
         
-        # 価格抽出（大幅改良版）
+        # 価格抽出（改良版関数を使用）
         price = "価格不明"
         
         # 方法1: 売り切れ商品特有のセレクタを試す
@@ -149,7 +223,7 @@ def extract_item_data(item_element):
             spans = item_element.find_all('span')
             for span in spans:
                 span_text = span.get_text().strip()
-                if any(keyword in span_text.lower() for keyword in ['sold', 'price', '$', 'usd']):
+                if any(keyword in span_text.lower() for keyword in ['sold', 'price', '$', 'usd', 'nt$']):
                     extracted_price = extract_price_from_text(span_text)
                     if extracted_price != "価格不明":
                         price = extracted_price
@@ -272,7 +346,7 @@ def search_japanese_items(session, keywords, pages=3):
     
     return all_items
 
-def filter_japanese_items(items, min_price=1.0):
+def filter_japanese_items(items, min_price=5.0):
     """
     和風商品をフィルタリング（改良版）
     """
@@ -382,6 +456,21 @@ def analyze_items(items):
         print(f"  平均価格: ${sum(prices)/len(prices):.2f}")
         print(f"  最高価格: ${max(prices):.2f}")
         print(f"  最低価格: ${min(prices):.2f}")
+        print(f"  中央値: ${sorted(prices)[len(prices)//2]:.2f}")
+        
+        # 価格帯分布
+        price_ranges = {
+            "$1-10": len([p for p in prices if 1 <= p <= 10]),
+            "$11-50": len([p for p in prices if 11 <= p <= 50]),
+            "$51-100": len([p for p in prices if 51 <= p <= 100]),
+            "$101-500": len([p for p in prices if 101 <= p <= 500]),
+            "$501-1000": len([p for p in prices if 501 <= p <= 1000]),
+            "$1000+": len([p for p in prices if p > 1000])
+        }
+        
+        print(f"\n💎 価格帯分布:")
+        for range_name, count in price_ranges.items():
+            print(f"  {range_name}: {count}件")
     
     # 人気キーワード分析
     keyword_counts = {}
@@ -426,13 +515,16 @@ def main():
     print("🚀 eBay和風商品スクレイピング開始")
     print("=" * 50)
     
+    # デバッグモード設定（必要に応じて有効化）
+    # extract_price_from_text.debug_mode = True
+    
     # セッション開始
     session = get_ebay_session()
     if not session:
         print("❌ セッション取得失敗")
         return
     
-    # 検索キーワード（空の場合は自動選択）
+    # 検索キーワード（カスタマイズ可能）
     custom_keywords = ["japan vintage", "japanese antique"]  # ここを変更可能
     
     # 商品検索
